@@ -3,6 +3,15 @@ import { AcpClient, selectModel } from "./acp.js";
 export const inject = ["react", "agents", "host"];
 const PREFIX = "maple.acp.sessions.v1:";
 const normalize = (value = {}) => ({ cwd: value.cwd?.trim() || "~/workspaces/buzz", model: value.model?.trim() || "", instructions: value.instructions || "" });
+// Buzz names each state file after its key. Channel-thread keys made that
+// path exceed Windows' 260-character limit, so long ones use their SHA-256.
+const MAX_CONVERSATION_PART = 64;
+async function conversationPart(key) {
+  const plain = encodeURIComponent(key);
+  if (plain.length <= MAX_CONVERSATION_PART) return plain;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key)));
+  return "sha256-" + [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export function apply(ctx) {
   const { agents, host, react: React } = ctx;
@@ -38,7 +47,9 @@ export function apply(ctx) {
 
   async function open(delivery, conversation, config) {
     if (disposed) throw new Error("Maple plugin is stopped");
-    const id = prefix(delivery.agent.key) + encodeURIComponent(conversation.key);
+    const id = prefix(delivery.agent.key) + await conversationPart(conversation.key);
+    // Sessions saved under the earlier long key are moved on first use.
+    const legacy = prefix(delivery.agent.key) + encodeURIComponent(conversation.key);
     let slot = slots.get(id);
     const signature = JSON.stringify(config);
     if (slot && slot.signature !== signature) {
@@ -55,7 +66,9 @@ export function apply(ctx) {
         let process;
         try {
           const cwd = await host.resolveDirectory(config.cwd);
-          const raw = await agents.storage.read(id);
+          const stored = await agents.storage.read(id);
+          const migrated = stored || legacy === id ? null : await agents.storage.read(legacy);
+          const raw = stored ?? migrated;
           const saved = raw ? JSON.parse(raw) : null;
           const reusable = saved?.signature === signature && saved.cwd === cwd && typeof saved.sessionId === "string";
           slot.cwd = cwd;
@@ -86,6 +99,7 @@ export function apply(ctx) {
           slot.primed = reusable && saved.primed === true;
           if (disposed) throw new Error("Plugin stopped during Maple startup");
           await save(slot);
+          if (migrated) await agents.storage.set(legacy, null);
           return slot;
         } catch (error) {
           if (slot.client) await slot.client.close().catch(() => {});

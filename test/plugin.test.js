@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { apply } from "../src/plugin.js";
 
-function fixture({ storage = new Map(), steering = "injected", http = true } = {}) {
+function fixture({ storage = new Map(), steering = "injected", http = true, conversationKey = "channel/thread" } = {}) {
   const calls = [];
   const servers = [];
   const processes = [];
@@ -16,7 +16,7 @@ function fixture({ storage = new Map(), steering = "injected", http = true } = {
       register: (value) => { type = value; },
       storage: { read: async (key) => storage.get(key) ?? null, scan: async (prefix) => Object.fromEntries([...storage].filter(([key]) => key.startsWith(prefix))), set: async (key, value) => value === null ? storage.delete(key) : storage.set(key, value) },
       harness: {
-        conversation: async (delivery) => delivery.allowed === false ? undefined : { key: "channel/thread", channel: "channel", root: "thread", topLevel: false },
+        conversation: async (delivery) => delivery.allowed === false ? undefined : { key: conversationKey, channel: "channel", root: "thread", topLevel: false },
         tools: (agent) => { assert.equal(agent.pubkey, "agent"); return async () => ({}); },
         turnPrompt: async (delivery, _, options) => { prompts.push(options); return { text: delivery.text, cursor: delivery.text, restore() {} }; },
         systemPrompt: async () => "Buzz instructions: send visible replies with Buzz tools",
@@ -117,4 +117,38 @@ test("unloading an active plugin cancels the task before closing its tool server
   await f.dispose();await run;
   assert.equal(f.calls.filter((call) => call.method === "session/cancel").length, 1);
   assert.equal(f.servers[0].closed, true);assert.equal(f.processes[0].killed, true);
+});
+
+const longKey = (root) => "5cadf6ad-09b4-4d7a-ba9a-c806b1970584/" + root.repeat(64);
+const signature = JSON.stringify({ cwd: "/work", model: "", instructions: "" });
+
+test("a channel-thread session is saved under a key short enough for Windows paths", async () => {
+  const storage = new Map();const f = fixture({ storage, conversationKey: longKey("a") });
+  const run = f.send("first");await until(() => f.processes[0]?.promptId);f.finish();await run;await f.dispose();
+  const [key] = [...storage.keys()];
+  assert.equal(storage.size, 1);
+  // Buzz's agent state directory on Windows is about 66 characters before the file name.
+  assert.ok(66 + 1 + encodeURIComponent(key).length < 240, key);
+  const other = new Map();const g = fixture({ storage: other, conversationKey: longKey("b") });
+  const again = g.send("first");await until(() => g.processes[0]?.promptId);g.finish();await again;await g.dispose();
+  assert.notEqual([...other.keys()][0], key);
+});
+
+test("a session saved under the earlier long key is resumed and moved", async () => {
+  const conversationKey = longKey("9");
+  const legacy = "maple.acp.sessions.v1:agent-key:" + encodeURIComponent(conversationKey);
+  const storage = new Map([[legacy, JSON.stringify({ sessionId: "old-session", cwd: "/work", signature, primed: true })]]);
+  const f = fixture({ storage, conversationKey });const run = f.send("next");await until(() => f.processes[0]?.promptId);
+  assert.equal(f.calls.find((call) => call.method === "session/load")?.params.sessionId, "old-session");
+  assert.equal(f.calls.some((call) => call.method === "session/new"), false);
+  f.finish();await run;await f.dispose();
+  assert.equal(storage.has(legacy), false);
+  assert.equal(storage.size, 1);
+  assert.equal(JSON.parse([...storage.values()][0]).sessionId, "old-session");
+});
+
+test("short conversation keys keep their existing session key", async () => {
+  const storage = new Map();const f = fixture({ storage });
+  const run = f.send("first");await until(() => f.processes[0]?.promptId);f.finish();await run;await f.dispose();
+  assert.deepEqual([...storage.keys()], ["maple.acp.sessions.v1:agent-key:" + encodeURIComponent("channel/thread")]);
 });

@@ -80,7 +80,10 @@ must be one Maple advertises; leaving it blank is the simplest starting point.
 ## Sessions
 
 The plugin keeps one Maple task per Buzz conversation and saves its session ID
-and context cursor in Buzz's native agent storage. Temporary HTTP MCP bearer
+and context cursor in Buzz's native agent storage. Long conversation keys, such
+as a channel thread's, are stored under their SHA-256 so the state file's path
+stays within Windows' 260-character limit; sessions saved under the earlier key
+are moved on first use. Temporary HTTP MCP bearer
 credentials stay in memory and are reattached when a session is loaded.
 Maple sends visible replies through Buzz's tools.
 
